@@ -8,11 +8,17 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 
+// Add request logging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
 // Configuration from environment variables
-const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN; // e.g., 'elotouchcare'
+const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN;
 const ZENDESK_EMAIL = process.env.ZENDESK_EMAIL;
 const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
-const PHONE_CUSTOM_FIELD_ID = '31133639456535'; // From your JSON
+const PHONE_CUSTOM_FIELD_ID = '31133639456535';
 
 // Zendesk API base URL
 const ZENDESK_API_BASE = `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2`;
@@ -30,25 +36,34 @@ const zendeskAPI = axios.create({
 });
 
 /**
+ * Get full ticket details from Zendesk API
+ */
+async function getTicketDetails(ticketId) {
+  try {
+    const response = await zendeskAPI.get(`/tickets/${ticketId}.json`);
+    return response.data.ticket;
+  } catch (error) {
+    console.error('Error fetching ticket:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+/**
  * Format phone number to E.164 format (+13035872087)
  */
 function formatPhoneNumber(phoneStr) {
   if (!phoneStr) return null;
   
-  // Remove all non-numeric characters
   const cleaned = phoneStr.replace(/\D/g, '');
   
-  // If it already starts with country code, just add +
   if (cleaned.length === 11 && cleaned.startsWith('1')) {
     return `+${cleaned}`;
   }
   
-  // If it's 10 digits, assume US and add +1
   if (cleaned.length === 10) {
     return `+1${cleaned}`;
   }
   
-  // If it already has + just return it
   if (phoneStr.startsWith('+')) {
     return phoneStr;
   }
@@ -61,7 +76,6 @@ function formatPhoneNumber(phoneStr) {
  */
 async function findUserByPhone(phoneNumber) {
   try {
-    // Search users by phone field
     const response = await zendeskAPI.get('/users/search.json', {
       params: {
         query: `phone:${phoneNumber}`
@@ -132,7 +146,24 @@ app.post('/webhook/ticket-created', async (req, res) => {
   try {
     console.log('Received webhook:', JSON.stringify(req.body, null, 2));
     
-    const ticket = req.body;
+    const webhookData = req.body;
+    const ticketId = webhookData.id;
+    
+    if (!ticketId) {
+      console.log('No ticket ID provided');
+      return res.status(400).json({ error: 'No ticket ID provided' });
+    }
+    
+    // Fetch full ticket details from Zendesk API
+    console.log(`Fetching ticket ${ticketId} from Zendesk API...`);
+    const ticket = await getTicketDetails(ticketId);
+    
+    if (!ticket) {
+      console.log('Could not fetch ticket details');
+      return res.status(404).json({ error: 'Could not fetch ticket details' });
+    }
+    
+    console.log(`Ticket channel: ${ticket.via?.channel}`);
     
     // Validate this is a voice channel ticket
     if (ticket.via?.channel !== 'voice') {
@@ -140,10 +171,12 @@ app.post('/webhook/ticket-created', async (req, res) => {
       return res.status(200).json({ message: 'Not a voice ticket, skipped' });
     }
     
-    // Extract phone number from via.source.from.phone
-    const rawPhone = ticket.via?.source?.from?.phone;
+    // Extract phone number from via.source.from
+    const rawPhone = ticket.via?.source?.from?.phone || ticket.via?.source?.from?.address;
+    
     if (!rawPhone) {
-      console.log('No phone number found in ticket');
+      console.log('No phone number found in ticket via source');
+      console.log('Via source:', JSON.stringify(ticket.via?.source, null, 2));
       return res.status(200).json({ message: 'No phone number found' });
     }
     
@@ -213,18 +246,44 @@ app.get('/', (req, res) => {
   });
 });
 
+// Keep track of server instance
+let server;
+
 // Graceful shutdown handling
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  server.close(() => {
-    console.log('HTTP server closed');
-  });
+  console.log('SIGTERM signal received: closing HTTP server gracefully');
+  if (server) {
+    server.close(() => {
+      console.log('HTTP server closed');
+      process.exit(0);
+    });
+    
+    setTimeout(() => {
+      console.log('Forcing server close after timeout');
+      process.exit(1);
+    }, 10000);
+  }
 });
 
-// Start server - bind to 0.0.0.0 for Railway
-const server = app.listen(PORT, '0.0.0.0', () => {
+process.on('SIGINT', () => {
+  console.log('SIGINT signal received: closing HTTP server gracefully');
+  if (server) {
+    server.close(() => {
+      console.log('HTTP server closed');
+      process.exit(0);
+    });
+  }
+});
+
+// Start server
+server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Zendesk Phone Processor running on port ${PORT}`);
   console.log(`Zendesk Subdomain: ${ZENDESK_SUBDOMAIN}`);
   console.log(`Webhook endpoint: /webhook/ticket-created`);
   console.log(`Server ready and listening on 0.0.0.0:${PORT}`);
+});
+
+server.on('error', (error) => {
+  console.error('Server error:', error);
+  process.exit(1);
 });
