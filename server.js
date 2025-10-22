@@ -213,9 +213,18 @@ app.get('/', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
+// Graceful shutdown handling
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+  });
+});
+
+// Start server - bind to 0.0.0.0 for Railway
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Zendesk Phone Processor running on port ${PORT}`);
   console.log(`Zendesk Subdomain: ${ZENDESK_SUBDOMAIN}`);
   console.log(`Webhook endpoint: /webhook/ticket-created`);
+  console.log(`Server ready and listening on 0.0.0.0:${PORT}`);
 });
