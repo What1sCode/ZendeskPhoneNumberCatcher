@@ -1,6 +1,16 @@
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 require('dotenv').config();
+
+// Validate required environment variables on startup
+const requiredEnvVars = ['ZENDESK_SUBDOMAIN', 'ZENDESK_EMAIL', 'ZENDESK_API_TOKEN', 'ZENDESK_WEBHOOK_SECRET'];
+const missingVars = requiredEnvVars.filter(v => !process.env[v]);
+if (missingVars.length > 0) {
+  console.error('❌ FATAL: Missing required environment variables:');
+  missingVars.forEach(v => console.error(`   - ${v}: [MISSING]`));
+  process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 
-// Add request logging
+// Request logging
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -18,6 +28,7 @@ app.use((req, res, next) => {
 const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN;
 const ZENDESK_EMAIL = process.env.ZENDESK_EMAIL;
 const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
+const WEBHOOK_SECRET = process.env.ZENDESK_WEBHOOK_SECRET;
 const PHONE_CUSTOM_FIELD_ID = '31133639456535';
 
 // Zendesk API base URL
@@ -34,6 +45,30 @@ const zendeskAPI = axios.create({
     'Content-Type': 'application/json'
   }
 });
+
+// Webhook signature verification middleware
+function verifyZendeskSignature(req, res, next) {
+  const signature = req.headers['x-zendesk-webhook-signature'];
+  const timestamp = req.headers['x-zendesk-webhook-signature-timestamp'];
+
+  if (!signature || !timestamp) {
+    console.warn('Webhook rejected: missing signature headers');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const payload = timestamp + JSON.stringify(req.body);
+  const expected = crypto
+    .createHmac('sha256', WEBHOOK_SECRET)
+    .update(payload)
+    .digest('base64');
+
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+    console.warn('Webhook rejected: invalid signature');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  next();
+}
 
 /**
  * Get full ticket details from Zendesk API
@@ -53,22 +88,29 @@ async function getTicketDetails(ticketId) {
  */
 function formatPhoneNumber(phoneStr) {
   if (!phoneStr) return null;
-  
+
+  // If already in E.164, return as-is
+  if (/^\+\d{7,15}$/.test(phoneStr.trim())) {
+    return phoneStr.trim();
+  }
+
   const cleaned = phoneStr.replace(/\D/g, '');
-  
+
   if (cleaned.length === 11 && cleaned.startsWith('1')) {
     return `+${cleaned}`;
   }
-  
+
   if (cleaned.length === 10) {
     return `+1${cleaned}`;
   }
-  
-  if (phoneStr.startsWith('+')) {
-    return phoneStr;
+
+  // Only return if digit count is within valid E.164 range
+  if (cleaned.length >= 7 && cleaned.length <= 15) {
+    return `+${cleaned}`;
   }
-  
-  return `+${cleaned}`;
+
+  console.warn(`Phone number "${phoneStr}" could not be formatted to E.164, skipping`);
+  return null;
 }
 
 /**
@@ -81,12 +123,12 @@ async function findUserByPhone(phoneNumber) {
         query: `phone:${phoneNumber}`
       }
     });
-    
+
     if (response.data.users && response.data.users.length > 0) {
       console.log(`Found existing user: ${response.data.users[0].id} with phone ${phoneNumber}`);
       return response.data.users[0];
     }
-    
+
     console.log(`No existing user found with phone ${phoneNumber}`);
     return null;
   } catch (error) {
@@ -129,7 +171,7 @@ async function updateTicket(ticketId, requesterId, formattedPhone) {
         ]
       }
     };
-    
+
     await zendeskAPI.put(`/tickets/${ticketId}.json`, updateData);
     console.log(`Updated ticket ${ticketId} with requester ${requesterId} and phone ${formattedPhone}`);
     return true;
@@ -142,82 +184,81 @@ async function updateTicket(ticketId, requesterId, formattedPhone) {
 /**
  * Main webhook handler for ticket created events
  */
-app.post('/webhook/ticket-created', async (req, res) => {
+app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => {
   try {
     console.log('Received webhook:', JSON.stringify(req.body, null, 2));
-    
-    const webhookData = req.body;
-    const ticketId = webhookData.id;
-    
-    if (!ticketId) {
-      console.log('No ticket ID provided');
-      return res.status(400).json({ error: 'No ticket ID provided' });
+
+    const rawId = req.body.id;
+    const ticketId = parseInt(rawId, 10);
+
+    if (!rawId || isNaN(ticketId) || ticketId <= 0) {
+      console.log('Invalid or missing ticket ID');
+      return res.status(400).json({ error: 'Invalid or missing ticket ID' });
     }
-    
+
     // Fetch full ticket details from Zendesk API
     console.log(`Fetching ticket ${ticketId} from Zendesk API...`);
     const ticket = await getTicketDetails(ticketId);
-    
+
     if (!ticket) {
       console.log('Could not fetch ticket details');
       return res.status(404).json({ error: 'Could not fetch ticket details' });
     }
-    
+
     console.log(`Ticket channel: ${ticket.via?.channel}`);
-    
+
     // Validate this is a voice channel ticket
     if (ticket.via?.channel !== 'voice') {
       console.log('Not a voice ticket, skipping');
       return res.status(200).json({ message: 'Not a voice ticket, skipped' });
     }
-    
+
     // Extract phone number from via.source.from
     const rawPhone = ticket.via?.source?.from?.phone || ticket.via?.source?.from?.address;
-    
+
     if (!rawPhone) {
       console.log('No phone number found in ticket via source');
       console.log('Via source:', JSON.stringify(ticket.via?.source, null, 2));
       return res.status(200).json({ message: 'No phone number found' });
     }
-    
+
     console.log(`Processing ticket ${ticket.id} with phone ${rawPhone}`);
-    
+
     // Format phone number
     const formattedPhone = formatPhoneNumber(rawPhone);
+    if (!formattedPhone) {
+      console.log(`Could not format phone number: ${rawPhone}`);
+      return res.status(200).json({ message: 'Could not format phone number' });
+    }
     console.log(`Formatted phone: ${formattedPhone}`);
-    
+
     // Search for existing user with this phone number
     const existingUser = await findUserByPhone(formattedPhone);
-    
+
     let finalRequesterId = ticket.requester_id;
-    
+
     if (existingUser) {
-      // User exists - use their ID
       console.log(`Using existing user ${existingUser.id}`);
       finalRequesterId = existingUser.id;
     } else {
-      // No existing user - update the auto-created user's phone field
       console.log(`Updating auto-created user ${ticket.requester_id} with phone`);
       await updateUserPhone(ticket.requester_id, formattedPhone);
     }
-    
+
     // Update ticket with correct requester and phone custom field
     await updateTicket(ticket.id, finalRequesterId, formattedPhone);
-    
-    res.status(200).json({ 
+
+    res.status(200).json({
       success: true,
       message: 'Ticket processed successfully',
       ticketId: ticket.id,
       requesterId: finalRequesterId,
       phone: formattedPhone
     });
-    
+
   } catch (error) {
     console.error('Error processing webhook:', error);
-    res.status(500).json({ 
-      success: false,
-      error: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
@@ -225,24 +266,9 @@ app.post('/webhook/ticket-created', async (req, res) => {
  * Health check endpoint
  */
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    service: 'zendesk-phone-processor'
-  });
-});
-
-/**
- * Root endpoint
- */
-app.get('/', (req, res) => {
   res.status(200).json({
-    service: 'Zendesk Phone Processor',
-    version: '1.0.0',
-    endpoints: {
-      webhook: 'POST /webhook/ticket-created',
-      health: 'GET /health'
-    }
+    status: 'healthy',
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -257,7 +283,7 @@ process.on('SIGTERM', () => {
       console.log('HTTP server closed');
       process.exit(0);
     });
-    
+
     setTimeout(() => {
       console.log('Forcing server close after timeout');
       process.exit(1);
@@ -278,7 +304,6 @@ process.on('SIGINT', () => {
 // Start server
 server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Zendesk Phone Processor running on port ${PORT}`);
-  console.log(`Zendesk Subdomain: ${ZENDESK_SUBDOMAIN}`);
   console.log(`Webhook endpoint: /webhook/ticket-created`);
   console.log(`Server ready and listening on 0.0.0.0:${PORT}`);
 });
