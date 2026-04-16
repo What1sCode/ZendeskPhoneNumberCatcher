@@ -236,6 +236,7 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
       await zendeskAPI.put(`/tickets/${ticketId}.json`, {
         ticket: {
           status: 'solved',
+          assignee_id: 38125927825687,
           tags: ['no_voicemail'],
           comment: {
             body: 'No voicemail was detected for this call. Auto-closed.',
