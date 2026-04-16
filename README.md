@@ -37,9 +37,9 @@ Change to your actual admin email, then save as `.env`
 
 Your file should look like:
 ```
-ZENDESK_SUBDOMAIN=elotouchcare
-ZENDESK_EMAIL=admin@elotouchcare.com  ← UPDATE THIS!
-ZENDESK_API_TOKEN=AItwPQ8Jdd5pVqaX9ZQYzoxRlf8SCr0ha3FK9AhX
+ZENDESK_SUBDOMAIN=
+ZENDESK_EMAIL=
+ZENDESK_API_TOKEN=
 PORT=3000
 ```
 
