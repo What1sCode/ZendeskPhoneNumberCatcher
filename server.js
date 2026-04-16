@@ -165,12 +165,11 @@ async function updateUserPhone(userId, phoneNumber) {
 /**
  * Update ticket with new requester and phone custom field
  */
-async function updateTicket(ticketId, requesterId, formattedPhone, existingTags = []) {
+async function updateTicket(ticketId, requesterId, formattedPhone) {
   try {
     const updateData = {
       ticket: {
         requester_id: requesterId,
-        tags: [...existingTags, 'auto_vm_closed'],
         custom_fields: [
           {
             id: PHONE_CUSTOM_FIELD_ID,
@@ -223,12 +222,6 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
     if (ticket.status === 'closed') {
       console.log(`Ticket ${ticketId} is closed, skipping`);
       return res.status(200).json({ message: 'Ticket closed, skipped' });
-    }
-
-    // Skip tickets already processed by this webhook
-    if ((ticket.tags || []).includes('auto_vm_closed')) {
-      console.log(`Ticket ${ticketId} already processed, skipping`);
-      return res.status(200).json({ message: 'Already processed, skipped' });
     }
 
     // Validate this is a voice channel ticket
@@ -293,7 +286,7 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
     }
 
     // Update ticket with correct requester and phone custom field
-    await updateTicket(ticket.id, finalRequesterId, formattedPhone, ticket.tags || []);
+    await updateTicket(ticket.id, finalRequesterId, formattedPhone);
 
     res.status(200).json({
       success: true,
