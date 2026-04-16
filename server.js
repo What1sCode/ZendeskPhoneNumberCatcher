@@ -165,11 +165,12 @@ async function updateUserPhone(userId, phoneNumber) {
 /**
  * Update ticket with new requester and phone custom field
  */
-async function updateTicket(ticketId, requesterId, formattedPhone) {
+async function updateTicket(ticketId, requesterId, formattedPhone, existingTags = []) {
   try {
     const updateData = {
       ticket: {
         requester_id: requesterId,
+        tags: [...existingTags, 'auto_vm_closed'],
         custom_fields: [
           {
             id: PHONE_CUSTOM_FIELD_ID,
@@ -218,6 +219,18 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
 
     console.log(`Ticket channel: ${ticket.via?.channel}`);
 
+    // Skip closed tickets — Zendesk locks all fields on closed tickets
+    if (ticket.status === 'closed') {
+      console.log(`Ticket ${ticketId} is closed, skipping`);
+      return res.status(200).json({ message: 'Ticket closed, skipped' });
+    }
+
+    // Skip tickets already processed by this webhook
+    if ((ticket.tags || []).includes('auto_vm_closed')) {
+      console.log(`Ticket ${ticketId} already processed, skipping`);
+      return res.status(200).json({ message: 'Already processed, skipped' });
+    }
+
     // Validate this is a voice channel ticket
     if (ticket.via?.channel !== 'voice') {
       console.log('Not a voice ticket, skipping');
@@ -235,9 +248,9 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
       console.log(`Ticket ${ticketId} has no voicemail, auto-closing`);
       await zendeskAPI.put(`/tickets/${ticketId}.json`, {
         ticket: {
-          status: 'solved',
+          custom_status_id: 14820391411735,
           assignee_id: 38125927825687,
-          tags: ['no_voicemail'],
+          tags: [...(ticket.tags || []), 'no_voicemail', 'auto_vm_closed'],
           comment: {
             body: 'No voicemail was detected for this call. Auto-closed.',
             public: false
@@ -280,7 +293,7 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
     }
 
     // Update ticket with correct requester and phone custom field
-    await updateTicket(ticket.id, finalRequesterId, formattedPhone);
+    await updateTicket(ticket.id, finalRequesterId, formattedPhone, ticket.tags || []);
 
     res.status(200).json({
       success: true,
