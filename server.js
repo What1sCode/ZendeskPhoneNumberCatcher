@@ -200,6 +200,10 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
       return res.status(400).json({ error: 'Invalid or missing ticket ID' });
     }
 
+    // Wait for Zendesk Talk to finish adding internal notes before processing
+    console.log(`Waiting 5 seconds for Zendesk to finish adding notes to ticket ${ticketId}...`);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
     // Fetch full ticket details from Zendesk API
     console.log(`Fetching ticket ${ticketId} from Zendesk API...`);
     const ticket = await getTicketDetails(ticketId);
