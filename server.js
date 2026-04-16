@@ -80,7 +80,10 @@ function verifyZendeskSignature(req, res, next) {
 async function getTicketDetails(ticketId) {
   try {
     const response = await zendeskAPI.get(`/tickets/${ticketId}.json?include=comments`);
-    return response.data.ticket;
+    const ticket = response.data.ticket;
+    // Comments come back at the response root, not nested inside ticket
+    ticket.comments = response.data.comments || [];
+    return ticket;
   } catch (error) {
     console.error('Error fetching ticket:', error.response?.data || error.message);
     return null;
