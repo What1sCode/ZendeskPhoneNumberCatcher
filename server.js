@@ -15,8 +15,12 @@ if (missingVars.length > 0) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(express.json());
+// Middleware - capture raw body for signature verification
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+}));
 
 // Request logging
 app.use((req, res, next) => {
@@ -56,7 +60,7 @@ function verifyZendeskSignature(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const payload = timestamp + JSON.stringify(req.body);
+  const payload = timestamp + req.rawBody;
   const expected = crypto
     .createHmac('sha256', WEBHOOK_SECRET)
     .update(payload)
@@ -75,7 +79,7 @@ function verifyZendeskSignature(req, res, next) {
  */
 async function getTicketDetails(ticketId) {
   try {
-    const response = await zendeskAPI.get(`/tickets/${ticketId}.json`);
+    const response = await zendeskAPI.get(`/tickets/${ticketId}.json?include=comments`);
     return response.data.ticket;
   } catch (error) {
     console.error('Error fetching ticket:', error.response?.data || error.message);
@@ -211,6 +215,28 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
     if (ticket.via?.channel !== 'voice') {
       console.log('Not a voice ticket, skipping');
       return res.status(200).json({ message: 'Not a voice ticket, skipped' });
+    }
+
+    // Check for untranscribable voicemail (no actual message left)
+    const comments = ticket.comments || [];
+    const hasNoVoicemail = comments.some(c =>
+      c.public === false &&
+      c.body?.includes('Call could not be transcribed or summarized')
+    );
+
+    if (hasNoVoicemail) {
+      console.log(`Ticket ${ticketId} has no voicemail, auto-closing`);
+      await zendeskAPI.put(`/tickets/${ticketId}.json`, {
+        ticket: {
+          status: 'solved',
+          tags: ['no_voicemail'],
+          comment: {
+            body: 'No voicemail was detected for this call. Auto-closed.',
+            public: false
+          }
+        }
+      });
+      return res.status(200).json({ message: 'No voicemail detected, ticket auto-closed' });
     }
 
     // Extract phone number from via.source.from
