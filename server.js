@@ -248,17 +248,25 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
 
     if (hasNoVoicemail) {
       console.log(`Ticket ${ticketId} has no voicemail, auto-closing`);
-      await zendeskAPI.put(`/tickets/${ticketId}.json`, {
-        ticket: {
-          custom_status_id: 14820391411735,
-          assignee_id: 38125927825687,
-          tags: [...(ticket.tags || []), 'no_voicemail', 'auto_vm_closed'],
-          comment: {
-            body: 'No voicemail was detected for this call. Auto-closed.',
-            public: false
+      try {
+        await zendeskAPI.put(`/tickets/${ticketId}.json`, {
+          ticket: {
+            status: 'solved',
+            custom_status_id: 14820391411735,
+            ticket_form_id: 32481202514071,
+            assignee_id: 38125927825687,
+            tags: [...(ticket.tags || []), 'no_voicemail', 'auto_vm_closed'],
+            comment: {
+              body: 'No voicemail was detected for this call. Auto-closed.',
+              public: false
+            }
           }
-        }
-      });
+        });
+        console.log(`Ticket ${ticketId} auto-closed successfully`);
+      } catch (closeErr) {
+        console.error(`Auto-close failed for ticket ${ticketId}:`, closeErr.response?.data || closeErr.message);
+        return res.status(500).json({ error: 'Auto-close failed' });
+      }
       return res.status(200).json({ message: 'No voicemail detected, ticket auto-closed' });
     }
 
