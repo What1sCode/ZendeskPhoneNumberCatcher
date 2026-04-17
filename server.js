@@ -79,10 +79,12 @@ function verifyZendeskSignature(req, res, next) {
  */
 async function getTicketDetails(ticketId) {
   try {
-    const response = await zendeskAPI.get(`/tickets/${ticketId}.json?include=comments`);
-    const ticket = response.data.ticket;
-    // Comments come back at the response root, not nested inside ticket
-    ticket.comments = response.data.comments || [];
+    const [ticketResp, commentsResp] = await Promise.all([
+      zendeskAPI.get(`/tickets/${ticketId}.json`),
+      zendeskAPI.get(`/tickets/${ticketId}/comments.json`)
+    ]);
+    const ticket = ticketResp.data.ticket;
+    ticket.comments = commentsResp.data.comments || [];
     return ticket;
   } catch (error) {
     console.error('Error fetching ticket:', error.response?.data || error.message);
@@ -163,13 +165,14 @@ async function updateUserPhone(userId, phoneNumber) {
 }
 
 /**
- * Update ticket with new requester and phone custom field
+ * Update ticket with new requester, phone custom field, and phone_processed tag
  */
-async function updateTicket(ticketId, requesterId, formattedPhone) {
+async function updateTicket(ticketId, requesterId, formattedPhone, existingTags = []) {
   try {
     const updateData = {
       ticket: {
         requester_id: requesterId,
+        tags: [...existingTags, 'phone_processed'],
         custom_fields: [
           {
             id: PHONE_CUSTOM_FIELD_ID,
@@ -180,7 +183,7 @@ async function updateTicket(ticketId, requesterId, formattedPhone) {
     };
 
     await zendeskAPI.put(`/tickets/${ticketId}.json`, updateData);
-    console.log(`Updated ticket ${ticketId} with requester ${requesterId} and phone ${formattedPhone}`);
+    console.log(`Updated ticket ${ticketId} with requester ${requesterId}, phone ${formattedPhone}, tag phone_processed`);
     return true;
   } catch (error) {
     console.error('Error updating ticket:', error.response?.data || error.message);
@@ -222,6 +225,12 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
     if (ticket.status === 'closed') {
       console.log(`Ticket ${ticketId} is closed, skipping`);
       return res.status(200).json({ message: 'Ticket closed, skipped' });
+    }
+
+    // Skip already-processed tickets — prevents cascade loop
+    if ((ticket.tags || []).includes('phone_processed') || (ticket.tags || []).includes('auto_vm_closed')) {
+      console.log(`Ticket ${ticketId} already processed (tags: ${ticket.tags}), skipping`);
+      return res.status(200).json({ message: 'Already processed, skipped' });
     }
 
     // Validate this is a voice channel ticket
@@ -285,8 +294,9 @@ app.post('/webhook/ticket-created', verifyZendeskSignature, async (req, res) => 
       await updateUserPhone(ticket.requester_id, formattedPhone);
     }
 
-    // Update ticket with correct requester and phone custom field
-    await updateTicket(ticket.id, finalRequesterId, formattedPhone);
+    // Update ticket with correct requester, phone custom field, and phone_processed tag
+    // phone_processed tag prevents the trigger from re-firing and causing a cascade loop
+    await updateTicket(ticket.id, finalRequesterId, formattedPhone, ticket.tags || []);
 
     res.status(200).json({
       success: true,
